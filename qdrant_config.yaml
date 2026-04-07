@@ -1,0 +1,51 @@
+# Qdrant Configuration for Production
+
+http:
+  api_key: "${QDRANT_API_KEY:-admin-secret-key}"
+  read_only_api_key: ""
+  max_batch_size: 100
+  max_recovery_workers: 25
+  heartbeat_timeout: 30s
+  timeout: 30s
+
+cors:
+  allow_origin_type: "all"
+
+telemetry_disabled: false
+
+storage:
+  # Storage path
+  storage_path: "/qdrant/storage"
+  
+  # Temporary directory - keeps intermediate vectors during search/insert operations
+  temp_path: "/qdrant/storage/temp"
+  
+  # Snapshot path
+  snapshots_path: "/qdrant/storage/snapshots"
+  
+  # Delete delay in seconds
+  delete_collection_timeout: 60
+  
+  # DB configuration
+  wal:
+    # Size of a single write-ahead-log segment in MB
+    wal_capacity_mb: 32
+    wal_segments_ahead: 0
+
+performance:
+  # The number of parallel threads used for search operations
+  max_search_threads: 4
+  
+  # The number of parallel threads used for insert/upsert operations
+  max_insert_threads: 4
+  
+  # The number of parallel threads used for delete operations  
+  max_delete_threads: 4
+  
+  # The number of parallel threads used for update operations
+  max_update_threads: 4
+
+service:
+  # Address to bind API server to
+  http_port: 6333
+  grpc_port: 6334

@@ -1,0 +1,20 @@
+# Python Dependencies for Knowledge Base Ingestion
+
+# OpenAI Python SDK for embeddings and LLM interactions
+openai>=1.0.0
+
+# Qdrant client for vector database operations
+qdrant-client>=1.7.0
+
+# Common utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Optional: for advanced operations
+numpy>=1.24.0
+tqdm>=4.66.0  # Progress bars
+
+# Development dependencies (optional)
+# pylint>=3.0.0
+# black>=23.0.0
+# pytest>=7.0.0

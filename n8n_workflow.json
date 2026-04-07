@@ -1,0 +1,472 @@
+{
+  "name": "AI Support Ticket Processing - Part 1 (Enhanced)",
+  "description": "Multi-step AI-powered support ticket workflow with RAG, routing, and error handling",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "support-ticket",
+        "httpMethod": "POST",
+        "responseMode": "lastNode"
+      },
+      "id": "Webhook",
+      "name": "Webhook — Receive Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [100, 300]
+    },
+
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "name",
+              "value": "={{$json.body.name}}"
+            },
+            {
+              "name": "email",
+              "value": "={{$json.body.email}}"
+            },
+            {
+              "name": "subject",
+              "value": "={{$json.body.subject}}"
+            },
+            {
+              "name": "message",
+              "value": "={{$json.body.message}}"
+            },
+            {
+              "name": "attachment_filename",
+              "value": "={{$json.body.attachment?.filename || ''}}"
+            },
+            {
+              "name": "attachment_text",
+              "value": "={{$json.body.attachment?.content || ''}}"
+            }
+          ]
+        }
+      },
+      "id": "NormalizeInput",
+      "name": "Set — Normalize Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// Validate email format properly\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nconst errors = [];\nif (!$json.name || $json.name.trim() === '') {\n  errors.push('Name is required');\n}\nif (!$json.email || !emailRegex.test($json.email)) {\n  errors.push('Valid email is required');\n}\nif (!$json.subject || $json.subject.trim() === '') {\n  errors.push('Subject is required');\n}\nif (!$json.message || $json.message.trim() === '') {\n  errors.push('Message body is required');\n}\n\nif (errors.length > 0) {\n  throw new Error(errors.join('; '));\n}\n\nreturn [{\n  json: {\n    ...$json,\n    validation_passed: true\n  }\n}];"
+      },
+      "id": "ValidateInput",
+      "name": "Function — Validate Input",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// Handle optional PDF attachment text if provided by upstream systems.\nconst attachment_filename = ($json.attachment_filename || '').trim();\nconst attachment_text = ($json.attachment_text || '').trim();\n\nlet processing_log = [];\nlet fulltext = $json.message || '';\n\nif (attachment_filename) {\n  if (attachment_text) {\n    fulltext = `${fulltext}\\n\\n[Attachment: ${attachment_filename}]\\n${attachment_text}`;\n    processing_log.push('attachment_text_appended');\n  } else {\n    // Bonus requirement fallback: continue without attachment text if extraction failed/unavailable.\n    processing_log.push(`attachment_present_but_no_text:${attachment_filename}`);\n  }\n}\n\nreturn [{\n  json: {\n    ...$json,\n    attachment_filename,\n    attachment_text,\n    fulltext,\n    processing_log\n  }\n}];"
+      },
+      "id": "ProcessAttachment",
+      "name": "Function — Process Attachment",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const id = 'TCK-' + Date.now();\n\nreturn [{\n  json: {\n    ...$json,\n    ticket_id: id,\n    timestamp: new Date().toISOString(),\n    status: 'processing'\n  }\n}];"
+      },
+      "id": "GenerateTicketID",
+      "name": "Function — Generate Ticket ID",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a professional support ticket classifier. Analyze the ticket and return ONLY a valid JSON object (no markdown, no extra text) with these exact fields:\n{\n  \"category\": \"technical|billing|feature_request|general|other\",\n  \"urgency\": \"critical|high|medium|low\",\n  \"sentiment\": \"positive|neutral|negative|angry\",\n  \"confidence\": 0.85,\n  \"summary\": \"Brief one-line summary\"\n}\nCritical: System down, data loss, security issue, or extreme frustration.\nHigh: Significant functionality broken, major workflow blocked.\nMedium: Non-critical feature not working or significant inconvenience.\nLow: General inquiry, feature request, minor issue."
+          },
+          {
+            "role": "user",
+            "content": "Subject: {{$json.subject}}\n\nMessage:\n{{$json.fulltext}}"
+          }
+        ]
+      },
+      "id": "ClassifyTicket",
+      "name": "OpenAI — Classify Ticket (Step 1)",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [1100, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "let classification;\n\nfunction collectStrings(value, bucket) {\n  if (value === null || value === undefined) return;\n  if (typeof value === 'string') {\n    bucket.push(value);\n    return;\n  }\n  if (Array.isArray(value)) {\n    for (const item of value) collectStrings(item, bucket);\n    return;\n  }\n  if (typeof value === 'object') {\n    for (const key of Object.keys(value)) collectStrings(value[key], bucket);\n  }\n}\n\nfunction fallbackClassification(reason) {\n  const blob = `${$json.subject || ''} ${$json.fulltext || $json.message || ''}`.toLowerCase();\n  let urgency = 'low';\n  if (/critical|urgent|security|breach|data loss|outage|down/.test(blob)) urgency = 'critical';\n  else if (/cannot|can't|failed|error|blocked|broken/.test(blob)) urgency = 'high';\n  else if (/issue|problem|slow|bug/.test(blob)) urgency = 'medium';\n\n  let category = 'general';\n  if (/bill|invoice|payment|refund|charge|price/.test(blob)) category = 'billing';\n  else if (/feature|request|enhancement/.test(blob)) category = 'feature_request';\n  else if (/error|login|auth|setup|api|integration|bug/.test(blob)) category = 'technical';\n\n  const sentiment = /angry|frustrated|terrible|worst/.test(blob) ? 'angry' : (/bad|upset|not happy/.test(blob) ? 'negative' : 'neutral');\n\n  return {\n    category,\n    urgency,\n    sentiment,\n    confidence: 0.35,\n    summary: `Fallback classification used: ${reason}`\n  };\n}\n\ntry {\n  const textCandidates = [];\n  collectStrings($json, textCandidates);\n\n  let parsed = null;\n  let rawExtract = '';\n\n  for (const candidate of textCandidates) {\n    const match = String(candidate).match(/\\{[\\s\\S]*\\}/);\n    if (!match) continue;\n\n    try {\n      parsed = JSON.parse(match[0]);\n      rawExtract = match[0];\n      break;\n    } catch (e) {\n      // keep scanning other candidates\n    }\n  }\n\n  if (!parsed) {\n    classification = fallbackClassification('no_json_in_ai_response');\n    return [{\n      json: {\n        ...$json,\n        ...classification,\n        ai_validation_passed: false,\n        ai_validation_warning: 'No JSON object found in AI response',\n        ai_response_raw: textCandidates.join('\\n').slice(0, 2000)\n      }\n    }];\n  }\n\n  classification = parsed;\n\n  const required = ['category', 'urgency', 'sentiment', 'confidence', 'summary'];\n  for (const field of required) {\n    if (!(field in classification)) {\n      throw new Error(`Missing required field: ${field}`);\n    }\n  }\n\n  const validUrgencies = ['critical', 'high', 'medium', 'low'];\n  classification.urgency = String(classification.urgency || '').toLowerCase();\n  if (!validUrgencies.includes(classification.urgency)) {\n    throw new Error(`Invalid urgency: ${classification.urgency}`);\n  }\n\n  classification.category = String(classification.category || 'other').toLowerCase();\n  classification.sentiment = String(classification.sentiment || 'neutral').toLowerCase();\n  classification.confidence = Number(classification.confidence);\n\n  if (Number.isNaN(classification.confidence) || classification.confidence < 0 || classification.confidence > 1) {\n    throw new Error(`Invalid confidence score: ${classification.confidence}`);\n  }\n\n  return [{\n    json: {\n      ...$json,\n      ...classification,\n      ai_validation_passed: true,\n      ai_response_raw: rawExtract\n    }\n  }];\n} catch (e) {\n  const fallback = fallbackClassification(e.message);\n  return [{\n    json: {\n      ...$json,\n      ...fallback,\n      ai_validation_passed: false,\n      ai_validation_warning: `AI Output Validation Error: ${e.message}`,\n      ai_response_raw: ''\n    }\n  }];\n}"
+      },
+      "id": "ValidateClassification",
+      "name": "Function — Validate Classification",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/embeddings",
+        "method": "POST",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={{ JSON.stringify({ model: 'text-embedding-3-small', input: [ (typeof $json.subject === 'string' ? $json.subject : ''), (typeof $json.fulltext === 'string' ? $json.fulltext : ''), (typeof $json.message === 'string' ? $json.message : ''), (typeof $json.message?.content === 'string' ? $json.message.content : '') ].filter(Boolean).join(' ').trim() }) }}"
+
+      },
+      "id": "CreateEmbedding",
+      "name": "OpenAI — Create Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1500, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// Normalize embedding output and restore upstream fields for downstream HTTP/function nodes.\nconst base = ($item(0).$node['Function — Validate Classification'] || {}).json || {};\n\nconst candidates = [\n  $json.embedding,\n  $json.data?.[0]?.embedding,\n  $json.response?.data?.[0]?.embedding,\n  $json.body?.data?.[0]?.embedding\n];\n\nconst vector = candidates.find((v) => Array.isArray(v) && v.length > 0);\nif (!vector) {\n  throw new Error('Embedding vector not found in OpenAI response');\n}\n\nreturn [{\n  json: {\n    ...base,\n    qdrant_vector: vector,\n    embedding_dimension: vector.length\n  }\n}];"
+      },
+      "id": "PrepareQdrantVector",
+      "name": "Function — Prepare Qdrant Vector",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+
+    {
+      "parameters": {
+        "url": "={{($env.QDRANT_URL || 'http://qdrant:6333') + '/collections/support_ticket/points/search'}}",
+        "method": "POST",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "={{$env.QDRANT_API_KEY || ''}}"
+            }
+          ]
+        },
+        "bodyParametersJson": "={{ JSON.stringify({ vector: $json.qdrant_vector, limit: 3, with_payload: true }) }}"
+      },
+      "id": "SearchKnowledge",
+      "name": "HTTP Request — Search Qdrant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "continueOnFail": true,
+      "position": [1700, 300]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// Process Qdrant results and compute retrieval confidence.\nconst rawResults =\n  ($json.result && $json.result.result) ||\n  ($json.result && Array.isArray($json.result) ? $json.result : null) ||\n  ($json.error ? [] : []);\n\n// n8n may block env access in Function nodes, so keep this as a local constant.\nconst threshold = 0.6;\nconst results = Array.isArray(rawResults) ? rawResults : [];\nconst knowledge_sources = [];\nlet knowledge_context = '';\n\nif (results.length > 0) {\n  knowledge_context = 'Relevant knowledge base articles:\\n\\n';\n  for (let i = 0; i < results.length; i++) {\n    const item = results[i] || {};\n    const payload = item.payload || {};\n    const source = payload.source || 'Unknown';\n    const content = payload.content || '';\n    const score = Number(item.score || 0);\n\n    knowledge_sources.push({ source, score });\n    knowledge_context += `[${i + 1}] Source: ${source} (Relevance: ${(score * 100).toFixed(1)}%)\\n`;\n    knowledge_context += `${String(content).substring(0, 350)}...\\n\\n`;\n  }\n} else {\n  knowledge_context = 'No specific knowledge base articles found.';\n}\n\nconst retrieval_score = knowledge_sources.length > 0 ? Number(knowledge_sources[0].score || 0) : 0;\nconst retrieval_low_confidence = retrieval_score < threshold;\n\nconst existingLog = Array.isArray($json.processing_log) ? $json.processing_log : [];\nconst processing_log = [\n  ...existingLog,\n  `knowledge_chunks:${knowledge_sources.length}`,\n  `retrieval_score:${retrieval_score.toFixed(4)}`,\n  `retrieval_low_confidence:${retrieval_low_confidence}`\n];\n\nreturn [{\n  json: {\n    ...$json,\n    knowledge_context,\n    knowledge_sources,\n    retrieval_score,\n    retrieval_low_confidence,\n    processing_log\n  }\n}];"
+      },
+      "id": "ProcessKnowledgeResults",
+      "name": "Function — Process Knowledge Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1900, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a professional customer support specialist. Generate a helpful, professional draft response based on ticket analysis and retrieved knowledge.\n\nRules:\n1. Match tone to customer sentiment.\n2. Reference relevant knowledge chunks using [1], [2], [3] when available.\n3. Be concise but actionable.\n4. If retrieval is low confidence, include this exact line once: 'No specific policy found — this response is based on general knowledge.'\n5. Do NOT send this email. This is an internal draft only.\n6. End with: 'This is a draft response pending support team review.'"
+          },
+          {
+            "role": "user",
+            "content": "Customer Name: {{$json.name}}\nTicket ID: {{$json.ticket_id}}\nSubject: {{$json.subject}}\nMessage: {{$json.message}}\n\nClassification:\n- Category: {{$json.category}}\n- Urgency: {{$json.urgency}}\n- Sentiment: {{$json.sentiment}}\n- Confidence: {{$json.confidence}}\n\nRetrieval:\n- Top score: {{$json.retrieval_score}}\n- Low confidence retrieval: {{$json.retrieval_low_confidence}}\n\nKnowledge Base Context:\n{{$json.knowledge_context}}\n\nGenerate a professional draft response:"
+          }
+        ]
+      },
+      "id": "GenerateDraftResponse",
+      "name": "OpenAI — Generate Draft Response (Step 2)",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [2100, 300]
+    },
+
+    {
+      "parameters": {
+            "functionCode": "const fromKnowledge = ($node['Function — Process Knowledge Results'] || {}).json || {};\nconst fromClassification = ($node['Function — Validate Classification'] || {}).json || {};\nconst merged = { ...fromKnowledge, ...fromClassification, ...$json };\n\nconst aiDraft =
+          merged.message?.content ||
+          merged.message ||
+          merged.text ||
+          merged.output ||
+          merged.content ||
+          '';\n\nconst currentConfidence = Number(merged.confidence);\nconst confidence = Number.isFinite(currentConfidence) ? currentConfidence : 0;\n\nlet status = 'normal';\nlet needs_review = false;\nif (confidence < 0.6) {\n  status = 'needs-manual-review';\n  needs_review = true;\n}\n\nconst existingLog = Array.isArray(merged.processing_log) ? merged.processing_log : [];\nconst processing_log = [\n  ...existingLog,\n  `ai_confidence:${confidence.toFixed(4)}`,\n  `status:${status}`\n];\n\nreturn [{\n  json: {\n    ...merged,\n    confidence,\n    status,\n    needs_manual_review: needs_review,\n    draft_response: aiDraft,\n    processing_log\n  }\n}];"
+      },
+      "id": "SetStatus",
+      "name": "Function — Set Status & Flag",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2300, 300]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.urgency}}",
+              "operation": "equals",
+              "value2": "critical"
+            },
+            {
+              "value1": "={{$json.urgency}}",
+              "operation": "equals",
+              "value2": "high"
+            }
+          ]
+        },
+        "combineOperation": "or"
+      },
+      "id": "HighPriorityCheck",
+      "name": "IF — Critical or High Urgency",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2500, 200]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.urgency}}",
+              "operation": "equals",
+              "value2": "medium"
+            }
+          ]
+        }
+      },
+      "id": "MediumPriorityCheck",
+      "name": "IF — Medium Urgency",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2700, 330]
+    },
+
+    {
+      "parameters": {
+        "fromEmail": "support@company.com",
+        "toEmail": "{{$json.email}}",
+        "subject": "Urgent Support Ticket {{$json.ticket_id}}: {{$json.subject}}",
+        "htmlBody": "<html><body>\n<h2>Urgent Support Ticket Received</h2>\n<p>Dear {{$json.name}},</p>\n<p>We have received your support ticket and it has been marked as <strong>{{$json.urgency}}</strong> priority.</p>\n<p><strong>Ticket ID:</strong> {{$json.ticket_id}}</p>\n<p><strong>Category:</strong> {{$json.category}}</p>\n<p><strong>Our Analysis:</strong> {{$json.summary}}</p>\n<hr/>\n<h3>Draft Response:</h3>\n<p>{{$json.draft_response}}</p>\n<hr/>\n<p><em>This is an automated notification. Our support team will review and respond shortly.</em></p>\n</body></html>"
+      },
+      "id": "EmailHighPriority",
+      "name": "Send Email — High Priority Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [2700, 100]
+    },
+
+    {
+      "parameters": {
+        "fromEmail": "support@company.com",
+        "toEmail": "{{$json.email}}",
+        "subject": "Support Ticket {{$json.ticket_id}}: {{$json.subject}}",
+        "htmlBody": "<html><body>\n<h2>Support Ticket Summary</h2>\n<p>Dear {{$json.name}},</p>\n<p>Thank you for contacting support. We have received your ticket.</p>\n<p><strong>Ticket ID:</strong> {{$json.ticket_id}}</p>\n<p><strong>Priority:</strong> {{$json.urgency}}</p>\n<p><strong>Summary:</strong> {{$json.summary}}</p>\n<p>Our team will review this and get back to you shortly.</p>\n</body></html>"
+      },
+      "id": "EmailMediumPriority",
+      "name": "Send Email — Medium Priority Summary",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [2900, 260]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const processing_log = Array.isArray($json.processing_log) ? $json.processing_log.join(' | ') : '';\n\nreturn [{\n  json: {\n    ticket_id: $json.ticket_id,\n    timestamp: $json.timestamp,\n    name: $json.name,\n    email: $json.email,\n    subject: $json.subject,\n    category: $json.category,\n    urgency: $json.urgency,\n    sentiment: $json.sentiment,\n    confidence: $json.confidence,\n    ai_summary: $json.summary,\n    draft_response: $json.draft_response,\n    knowledge_sources: JSON.stringify($json.knowledge_sources || []),\n    status: $json.status,\n    processing_log\n  }\n}];"
+      },
+      "id": "PrepareSheetRow",
+      "name": "Function — Prepare Sheet Row",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3100, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{$env.GOOGLE_SHEETS_ID || $env.GOOGLE_SHEET_ID}}",
+        "range": "A:N",
+        "options": {
+          "valueInputOption": "USER_ENTERED"
+        }
+      },
+      "id": "AppendToSheets",
+      "name": "Google Sheets — Log Ticket",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 2,
+      "position": [3300, 300]
+    },
+
+    {
+      "parameters": {
+        "jsonParameters": true,
+        "bodyParametersJson": "{\n  \"ticket_id\": \"{{$json.ticket_id}}\",\n  \"timestamp\": \"{{$json.timestamp}}\",\n  \"status\": \"success\",\n  \"message\": \"Ticket processed successfully\"\n}"
+      },
+      "id": "RespondWebhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3500, 300]
+    },
+
+    {
+      "parameters": {
+        "jsonParameters": true,
+        "bodyParametersJson": "{\n  \"ticket_id\": \"{{$json.ticket_id}}\",\n  \"status\": \"error\",\n  \"error\": \"{{$error.message}}\",\n  \"message\": \"Ticket processing failed\"\n}"
+      },
+      "id": "RespondWebhookError",
+      "name": "Respond to Webhook — Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3500, 500]
+    },
+
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{$env.GOOGLE_SHEETS_ID || $env.GOOGLE_SHEET_ID}}",
+        "range": "A:D"
+      },
+      "id": "LogError",
+      "name": "Google Sheets — Log Error",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 2,
+      "position": [3300, 500]
+    }
+  ],
+
+  "connections": {
+    "Webhook — Receive Ticket": {
+      "main": [[{ "node": "Set — Normalize Input", "type": "main", "index": 0 }]]
+    },
+
+    "Set — Normalize Input": {
+      "main": [[{ "node": "Function — Validate Input", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Validate Input": {
+      "main": [[{ "node": "Function — Process Attachment", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Process Attachment": {
+      "main": [[{ "node": "Function — Generate Ticket ID", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Generate Ticket ID": {
+      "main": [[{ "node": "OpenAI — Classify Ticket (Step 1)", "type": "main", "index": 0 }]]
+    },
+
+    "OpenAI — Classify Ticket (Step 1)": {
+      "main": [[{ "node": "Function — Validate Classification", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Validate Classification": {
+      "main": [[{ "node": "OpenAI — Create Embedding", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "OpenAI — Create Embedding": {
+      "main": [[{ "node": "Function — Prepare Qdrant Vector", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Prepare Qdrant Vector": {
+      "main": [[{ "node": "HTTP Request — Search Qdrant", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "HTTP Request — Search Qdrant": {
+      "main": [[{ "node": "Function — Process Knowledge Results", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Function — Process Knowledge Results", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Process Knowledge Results": {
+      "main": [[{ "node": "OpenAI — Generate Draft Response (Step 2)", "type": "main", "index": 0 }]]
+    },
+
+    "OpenAI — Generate Draft Response (Step 2)": {
+      "main": [[{ "node": "Function — Set Status & Flag", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Set Status & Flag": {
+      "main": [[{ "node": "IF — Critical or High Urgency", "type": "main", "index": 0 }]]
+    },
+
+    "IF — Critical or High Urgency": {
+      "main": [
+        [{ "node": "Send Email — High Priority Alert", "type": "main", "index": 0 }],
+        [{ "node": "IF — Medium Urgency", "type": "main", "index": 0 }]
+      ]
+    },
+
+    "IF — Medium Urgency": {
+      "main": [
+        [{ "node": "Send Email — Medium Priority Summary", "type": "main", "index": 0 }],
+        [{ "node": "Function — Prepare Sheet Row", "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Send Email — High Priority Alert": {
+      "main": [[{ "node": "Function — Prepare Sheet Row", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Send Email — Medium Priority Summary": {
+      "main": [[{ "node": "Function — Prepare Sheet Row", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Function — Prepare Sheet Row": {
+      "main": [[{ "node": "Google Sheets — Log Ticket", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Google Sheets — Log Error", "type": "main", "index": 0 }]]
+    },
+
+    "Google Sheets — Log Ticket": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Respond to Webhook — Error", "type": "main", "index": 0 }]]
+    },
+
+    "Google Sheets — Log Error": {
+      "main": [[{ "node": "Respond to Webhook — Error", "type": "main", "index": 0 }]]
+    }
+  }
+}

@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-http://localhost:5678/}
+      - NODE_ENV=production
+      - WEBHOOK_TUNNEL_URL=${WEBHOOK_TUNNEL_URL:-http://localhost:5678/}
+      - GENERIC_TIMEZONE=${TIMEZONE:-UTC}
+      - DATABASE_TYPE=sqlite
+      - DATABASE_SQLITE_FILE=/data/database.sqlite
+      # OpenAI credentials
+      - OPENAI_API_KEY=${OPENAI_API_KEY:?error}
+      # Google Sheets credentials (Base64 encoded service account JSON)
+      - GOOGLE_APPLICATION_CREDENTIALS_JSON=${GOOGLE_APPLICATION_CREDENTIALS_JSON}
+      # Email credentials for alerts
+      - EMAIL_SMTP_HOST=${EMAIL_SMTP_HOST:-smtp.gmail.com}
+      - EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT:-587}
+      - EMAIL_SMTP_USER=${EMAIL_SMTP_USER}
+      - EMAIL_SMTP_PASSWORD=${EMAIL_SMTP_PASSWORD}
+      - EMAIL_FROM=${EMAIL_FROM:-alerts@company.com}
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - ./data:/data
+    networks:
+      - n8n-network
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-admin-secret-key}
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./qdrant_config.yaml:/qdrant/config/production.yaml
+    networks:
+      - n8n-network
+    command: >
+      ./qdrant
+      --config-path=/qdrant/config/production.yaml
+
+  insert-payloads:
+    image: python:3.10-slim
+    container_name: insert-payloads
+    depends_on:
+      - n8n
+      - qdrant
+    volumes:
+      - ./:/app
+    working_dir: /app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+    command: ["/bin/sh", "-c", "pip install requests && python insert_payloads.py"]
+    networks:
+      - n8n-network
+    restart: "no"
+
+volumes:
+  n8n_storage:
+  qdrant_storage:
+
+networks:
+  n8n-network:
+    driver: bridge
