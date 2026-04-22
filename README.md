@@ -35,7 +35,55 @@
 - **Advanced PDF Handling:** Integrate OCR and robust PDF parsing for scanned or image-based attachments.
 
 ## Overview
+
 This system automates support ticket intake, classification, knowledge retrieval, draft response generation, and routing using n8n, OpenAI, Qdrant, and Google Sheets. The workflow is designed for robust error handling, PDF attachment support, and clear audit trails.
+
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+      A[Webhook: Receive Ticket] --> B[Set: Normalize Input]
+      B --> C[Function: Validate Input]
+      C --> D[Function: Process Attachment]
+      D --> E[Function: Generate Ticket ID]
+      E --> F[OpenAI: Classify Ticket]
+      F --> G[Function: Validate Classification]
+      G --> H[OpenAI: Create Embedding]
+      H --> I[Function: Prepare Qdrant Vector]
+      I --> J[HTTP: Search Qdrant]
+      J --> K[Function: Process Knowledge Results]
+      K --> L[OpenAI: Generate Draft Response]
+      L --> M[Function: Set Status & Flag]
+      M --> N{Urgency Check}
+      N -- High/Critical --> O[Send Email: High Priority Alert]
+      N -- Medium --> P[Send Email: Medium Priority Summary]
+      O --> Q[Function: Prepare Sheet Row]
+      P --> Q
+      Q --> R[Google Sheets: Log Ticket]
+      R --> S[Respond to Webhook]
+      C -- Error --> T[Format Error Response]
+      D -- Error --> T
+      E -- Error --> T
+      F -- Error --> T
+      G -- Error --> T
+      H -- Error --> T
+      I -- Error --> T
+      J -- Error --> T
+      K -- Error --> T
+      L -- Error --> T
+      M -- Error --> T
+      O -- Error --> T
+      P -- Error --> T
+      Q -- Error --> T
+      R -- Error --> T
+      T --> U[Prepare Error Log]
+      U --> V[Google Sheets: Log Error]
+      V --> W[Respond to Webhook: Error]
+```
+
+<p align="center">
+   <img src="workflow_diagram.png" alt="Workflow Diagram" width="700"/>
+</p>
 
 ---
 
