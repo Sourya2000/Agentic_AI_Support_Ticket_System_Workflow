@@ -52,22 +52,7 @@ services:
       ./qdrant
       --config-path=/qdrant/config/production.yaml
 
-  insert-payloads:
-    image: python:3.10-slim
-    container_name: insert-payloads
-    depends_on:
-      - n8n
-      - qdrant
-    volumes:
-      - ./:/app
-    working_dir: /app
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - QDRANT_URL=http://qdrant:6333
-    command: ["/bin/sh", "-c", "pip install requests && python insert_payloads.py"]
-    networks:
-      - n8n-network
-    restart: "no"
+  
 
 volumes:
   n8n_storage:
