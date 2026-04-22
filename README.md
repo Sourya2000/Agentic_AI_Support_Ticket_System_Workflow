@@ -82,7 +82,7 @@ flowchart TD
 ```
 
 <p align="center">
-   <img src="workflow_diagram.png" alt="Workflow Diagram" width="700"/>
+   <img src="workflow_diagram_v2.png" alt="Workflow Diagram" width="700"/>
 </p>
 
 ---
